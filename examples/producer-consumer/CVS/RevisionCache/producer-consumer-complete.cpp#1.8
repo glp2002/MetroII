@@ -1,0 +1,453 @@
+/*
+   Copyright (c) 2007 The Regents of the University of California.
+   All rights reserved.
+
+   Permission is hereby granted, without written agreement and without
+   license or royalty fees, to use, copy, modify, and distribute this
+   software and its documentation for any purpose, provided that the
+   above copyright notice and the following two paragraphs appear in all
+   copies of this software and that appropriate acknowledgments are made
+   to the research of the Metropolis group.
+
+   IN NO EVENT SHALL THE UNIVERSITY OF CALIFORNIA BE LIABLE TO ANY PARTY
+   FOR DIRECT, INDIRECT, SPECIAL, INCIDENTAL, OR CONSEQUENTIAL DAMAGES
+   ARISING OUT OF THE USE OF THIS SOFTWARE AND ITS DOCUMENTATION, EVEN IF
+   THE UNIVERSITY OF CALIFORNIA HAS BEEN ADVISED OF THE POSSIBILITY OF
+   SUCH DAMAGE.
+
+   THE UNIVERSITY OF CALIFORNIA SPECIFICALLY DISCLAIMS ANY WARRANTIES,
+   INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+   MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE. THE SOFTWARE
+   PROVIDED HEREUNDER IS ON AN "AS IS" BASIS, AND THE UNIVERSITY OF
+   CALIFORNIA HAS NO OBLIGATION TO PROVIDE MAINTENANCE, SUPPORT, UPDATES,
+   ENHANCEMENTS, OR MODIFICATIONS.
+
+   METROPOLIS_COPYRIGHT_VERSION_1
+   COPYRIGHTENDKEY
+   */
+
+// MetroII example: producer_consumer with mapping
+// Authors: Qi Zhu 
+
+#include "metroII.h"
+
+//******************************************************************************
+// Interface definition that is similar to systemc syntax
+//******************************************************************************
+
+// functional services
+M2_INTERFACE(i_receiver) 
+{
+  public:
+    M2_TWOARG_PROCEDURE(receive, double *, unsigned long);
+    M2_NOARG_PROCEDURE(wait_data);
+    M2_NOARG_PROCEDURE(read_notify);
+};
+
+M2_INTERFACE(i_sender) 
+{
+  public:
+    virtual void testafunc()
+    {
+        cout << "doing nothing" << endl;
+    }
+    M2_TWOARG_PROCEDURE(send, const double *, unsigned long);
+    M2_NOARG_PROCEDURE(wait_empty);
+    M2_NOARG_PROCEDURE(write_notify);
+};
+
+// architectural services
+M2_INTERFACE(i_arch_receiver_task) 
+{
+  public:
+    M2_TWOARG_PROCEDURE(receive, double *, unsigned long);
+};
+
+M2_INTERFACE(i_arch_sender_task) 
+{
+  public:
+    M2_FOURARG_PROCEDURE(send, const double *, unsigned long, m2_event *, m2_event *);
+};
+
+M2_INTERFACE(i_arch_receiver_memory) 
+{
+  public:
+    M2_THREEARG_PROCEDURE(receive, double *, unsigned long, unsigned long);
+};
+
+M2_INTERFACE(i_arch_sender_memory) 
+{
+  public:
+    M2_THREEARG_PROCEDURE(send, const double *, unsigned long, unsigned long);
+};
+
+//******************************************************************************
+// Reader component
+//******************************************************************************
+M2_COMPONENT(Reader)
+{
+  public:
+    m2_required_port<i_receiver> out_port;
+
+    sc_process_handle this_thread;
+
+    m2_event *receive_event_beg, *receive_event_end;
+
+    SC_HAS_PROCESS(Reader);
+
+    Reader(sc_module_name n) : m2_component(n)
+    {
+        SC_THREAD(main);
+        receive_event_beg = &(out_port->receive(M2_EVENT_BEGIN));
+        receive_event_end = &(out_port->receive(M2_EVENT_END));
+    }
+
+    void main() 
+    {
+        this_thread = sc_get_current_process_handle();
+        double array[3];
+
+        for (int i=0; i<5; i++)
+        {
+            out_port->wait_data();
+            out_port->receive(array, 3);
+            out_port->read_notify();
+            cout << "reader reads value: " << array[0] << " " << array[1] << " " << array[2] << " ends iteration " << i << endl;
+        }
+        m2_end(this_thread);
+    }
+};
+
+//******************************************************************************
+// Writer component.
+//******************************************************************************
+M2_COMPONENT(Writer)
+{
+  public:
+    m2_required_port<i_sender> out_port;
+
+    sc_process_handle thread1;
+
+    m2_event *send_event_beg, *send_event_end;
+
+    int data;
+
+    SC_HAS_PROCESS(Writer);
+    Writer(sc_module_name n, int _data) : m2_component(n)
+    {
+        data = _data;
+        SC_THREAD(main);
+        send_event_beg = &(out_port->send(M2_EVENT_BEGIN));
+        send_event_end = &(out_port->send(M2_EVENT_END));
+    }
+
+    void main() 
+    {
+        if ((sc_process_b*) thread1 == NULL)
+            thread1 = sc_get_current_process_handle();
+
+        double array[3];
+
+        for (int i=0; i<5; i++)
+        {			
+            array[0] = i + data * 10;
+            array[1] = 3 * i + data * 10;
+            array[2] = 5 * i + data * 10;
+
+            send_event_beg->val = i;
+            out_port->wait_empty();
+            out_port->send(array, 3);
+            out_port->write_notify();
+            M2_DEBUG_TEMP("value in sender from arch " << send_event_end->val);
+            cout << sc_get_current_process_handle().name() << " wrote " << array[0] << " " << array[1] << " " << array[2] <<
+                " ends iteration " << i << endl;
+        }
+        m2_end(thread1);
+    }
+};
+
+class blocking_channel : public m2_channel, public i_sender, public i_receiver
+{
+  public:
+    m2_read_port<i_receiver> read_port;
+    m2_write_port<i_sender> write_port;
+
+    blocking_channel(sc_module_name n, unsigned long _size) : m2_channel(n)
+    {
+        empty = true;
+        size = _size;
+        buffer = new double[size];
+    }
+
+    void wait_data()
+    {
+        if (empty) {
+            m2_wait(written);
+        }
+    }
+
+    void wait_empty()
+    {
+        if (!empty) {
+            m2_wait(read);
+        }
+    }
+
+    void write_notify()
+    {
+        written.notify();	
+    }
+
+    void read_notify()
+    {
+        read.notify();
+    }
+
+    // receive method
+    void receive(double * data, unsigned long len) 
+    {
+        M2_DEBUG_TEMP("entering receiving...");
+        if (len != dataLen) 
+        {
+            abort();
+        }
+        memcpy(data, buffer, len*sizeof(double));
+        empty = true;
+        M2_DEBUG_TEMP("finished receiving...");
+    }
+
+    // send method
+    void send(const double * data, unsigned long len) 
+    {
+        M2_DEBUG_TEMP("entering sending...");
+        if (len > size)
+        {
+            abort();
+        }
+        memcpy(buffer, data, len*sizeof(double));
+        dataLen = len;
+        empty = false;
+        M2_DEBUG_TEMP("finished sending...");
+    }
+
+  private:
+    bool empty;
+    sc_event written, read;
+    double * buffer;
+    unsigned long size;
+    unsigned long dataLen;
+};
+
+//******************************************************************************
+// Mapping Processes
+//******************************************************************************
+M2_COMPONENT(Reader_Task)
+{
+  public:
+    m2_required_port<i_arch_receiver_task> read_port;
+    m2_event *receive_event_beg, *receive_event_end;
+
+    SC_HAS_PROCESS(Reader_Task);
+
+    Reader_Task(sc_module_name n) : m2_component(n)
+    {
+        SC_THREAD(receive_thread);
+        receive_event_beg = &(read_port->receive(M2_EVENT_BEGIN));
+        receive_event_end = &(read_port->receive(M2_EVENT_END));
+    }
+
+    void receive_thread() 
+    {
+        while (true)
+        {
+            double array[3];
+            read_port->receive(array, 3);
+        }
+    }	
+};
+
+M2_COMPONENT(Writer_Task)
+{
+  public:
+    m2_required_port<i_arch_sender_task> write_port;
+    m2_event *send_event_beg, *send_event_end;
+
+    SC_HAS_PROCESS(Writer_Task);
+
+    Writer_Task(sc_module_name n) : m2_component(n)
+    {
+        SC_THREAD(send_thread);
+        send_event_beg = &(write_port->send(M2_EVENT_BEGIN));
+        send_event_end = &(write_port->send(M2_EVENT_END));
+    }
+
+    void send_thread() 
+    {
+        while (true)
+        {
+            double array[3];
+            write_port->send(array, 3, send_event_beg, send_event_end);
+            M2_DEBUG_TEMP("value in receive from func " << send_event_beg->val);
+            M2_DEBUG_TEMP("finish sending in arch");
+        }
+    }
+};
+
+//******************************************************************************
+// Architecture components
+//******************************************************************************
+
+class Processor : public m2_component, public i_arch_receiver_task, public i_arch_sender_task
+{
+  public:
+    m2_provided_port<i_arch_receiver_task> read_port;  
+    m2_provided_port<i_arch_sender_task> write_port;
+
+    m2_required_port<i_arch_receiver_memory> memory_read_port;
+    m2_required_port<i_arch_sender_memory> memory_write_port;
+
+    Processor(sc_module_name n) : m2_component(n)
+    {
+    }
+
+    void receive(double * data, unsigned long size) 
+    {
+        M2_DEBUG_TEMP("before receive in processor");
+        memory_read_port->receive(data, size, 0);
+        M2_DEBUG_TEMP("after receive in processor");
+    }
+
+    void send(const double * data, unsigned long size, m2_event * beg_event, m2_event * end_event) 
+    {
+        M2_DEBUG_TEMP("before send in processor");
+        memory_write_port->send(data, size, 0);
+        end_event->val = beg_event->val * 2;
+        M2_DEBUG_TEMP("after send in processor");
+    }
+};
+
+class Memory : public m2_component, public i_arch_receiver_memory, public i_arch_sender_memory
+{
+  public:
+    m2_read_port<i_arch_receiver_memory> memory_read_port;  
+    m2_write_port<i_arch_sender_memory> memory_write_port;
+
+    Memory(sc_module_name n) : m2_component(n)
+    {
+    }
+
+    void receive(double * data, unsigned long size, unsigned long addr) 
+    {
+        cout << "reading data from memory ..." << endl;
+    }
+
+    void send(const double * data, unsigned long size, unsigned long addr) 
+    {
+        cout << "writing data to memory ..." << endl;
+    }
+};
+
+
+//******************************************************************************
+// sc_main
+// set up components and their connections
+//******************************************************************************
+int sc_main (int argc, char** argv)
+{
+    blocking_channel c("Blocking_Channel", 10);
+    Reader r("Reader");
+    Writer w("Writer", 1);
+    blocking_channel c2("Blocking_Channel2", 10);
+    Reader r2("Reader2");
+    Writer w2("Writer2", 2);
+
+    M2_CONNECT(r, out_port, c, read_port);
+    M2_CONNECT(w, out_port, c, write_port);
+    M2_CONNECT(r2, out_port, c2, read_port);
+    M2_CONNECT(w2, out_port, c2, write_port);
+
+    c.set_func_arch_flag(0);
+    r.set_func_arch_flag(0);
+    w.set_func_arch_flag(0);
+    c2.set_func_arch_flag(0);
+    r2.set_func_arch_flag(0);
+    w2.set_func_arch_flag(0);
+
+    Reader_Task rt("Reader_Task");
+    Writer_Task wt("Writer_Task");
+    Reader_Task rt2("Reader_Task2");
+    Writer_Task wt2("Writer_Task2");
+
+    Processor p("Processor");
+    Memory m("Memory");
+    M2_CONNECT(rt, read_port, p, read_port);
+    M2_CONNECT(wt, write_port, p, write_port);
+    M2_CONNECT(p, memory_read_port, m, memory_read_port);
+    M2_CONNECT(p, memory_write_port, m, memory_write_port);
+    M2_CONNECT(rt2, read_port, p, read_port);
+    M2_CONNECT(wt2, write_port, p, write_port);
+
+    rt.set_func_arch_flag(1);
+    wt.set_func_arch_flag(1);
+    rt2.set_func_arch_flag(1);
+    wt2.set_func_arch_flag(1);
+    p.set_func_arch_flag(1);
+    m.set_func_arch_flag(1);
+
+    // set mapping constraints
+    m2_constraint_solver* mapping_constraints = new m2_constraint_solver();
+    register_constraint_solver(mapping_constraints);
+    M2_MAP(r, receive, rt, receive);
+    M2_MAP(w, send, wt, send);
+    M2_MAP(r2, receive, rt2, receive);
+    M2_MAP(w2, send, wt2, send);
+
+    // set physical time annotatior
+    std::vector<m2_event *> ptime_event_list;
+    ptime_event_list.push_back(rt.receive_event_end);
+    ptime_event_list.push_back(wt.send_event_end);
+    ptime_event_list.push_back(rt2.receive_event_end);
+    ptime_event_list.push_back(wt2.send_event_end);
+
+    std::map<const char*, double, ltstr> ptime_table;
+    ptime_table[rt.receive_event_end->get_full_name()] = 0.5;
+    ptime_table[wt.send_event_end->get_full_name()] = 2;
+    ptime_table[rt2.receive_event_end->get_full_name()] = 1.25;
+    ptime_table[wt2.send_event_end->get_full_name()] = 3;
+
+    m2_physical_time_annotator* ptime = new m2_physical_time_annotator("pt_annotator", ptime_event_list, &ptime_table); 
+    register_annotator(ptime);
+
+    // set round robin scheduler for writer tasks and reader tasks
+    m2_round_robin_scheduler* rr_scheduler1 = new m2_round_robin_scheduler("rr1");
+    rr_scheduler1->add_event(wt.send_event_beg);
+    rr_scheduler1->add_event(wt.send_event_end);
+    rr_scheduler1->add_event(wt2.send_event_beg);
+    rr_scheduler1->add_event(wt2.send_event_end);
+    register_scheduler(rr_scheduler1);
+
+    m2_round_robin_scheduler* rr_scheduler2 = new m2_round_robin_scheduler("rr2");
+    rr_scheduler2->add_event(rt.receive_event_beg);
+    rr_scheduler2->add_event(rt.receive_event_end);
+    rr_scheduler2->add_event(rt2.receive_event_beg);
+    rr_scheduler2->add_event(rt2.receive_event_end);
+    register_scheduler(rr_scheduler2);
+
+    // set logical time scheduler
+    m2_logical_time_scheduler* ltime = new m2_logical_time_scheduler("lt_scheduler", 4);
+    ltime->add_event(rt.receive_event_beg);
+    ltime->add_event(rt.receive_event_end);
+    ltime->add_event(wt.send_event_beg);
+    ltime->add_event(wt.send_event_end);
+    ltime->add_event(rt2.receive_event_beg);
+    ltime->add_event(rt2.receive_event_end);
+    ltime->add_event(wt2.send_event_beg);
+    ltime->add_event(wt2.send_event_end);
+    register_scheduler(ltime);
+
+    m2_start();
+
+    printf("simulation ends\n");
+
+    return 1;
+}

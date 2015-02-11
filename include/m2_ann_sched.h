@@ -1,0 +1,610 @@
+// Base classes and libraries of annotator and scheduler, including physical
+// time annotator, logical time scheduler and round-robin scheduler
+// Author: Qi Zhu
+
+#ifndef M2_ANN_SCHED_H
+#define M2_ANN_SCHED_H
+
+#include "m2_base.h"
+#include "m2_debug.h"
+#include "m2_event.h"
+#include <assert.h>
+
+namespace m2_core { // begin namespace m2_core 
+
+
+    //**************************************************************
+    // MetroII annotator 
+    //**************************************************************    
+    class m2_annotator
+    {
+      protected:
+        const char* _name;
+        std::vector<m2_event *> _event_list;
+
+      public:
+        m2_annotator()
+        {
+            _name = "unknown";
+        }
+
+        m2_annotator(const char* name)
+        {
+            _name = name; 
+        }
+
+        m2_annotator(const std::vector<m2_event *> event_list)
+        {
+            _name = "unknown"; 
+            _event_list= event_list;
+        }
+
+        m2_annotator(const char* name, const std::vector<m2_event *> event_list)
+        {
+            _name = name; 
+            _event_list= event_list;
+        }
+
+        void add_event(m2_event* e)
+        {
+            _event_list.push_back(e);
+        }
+
+        virtual ~m2_annotator() {}
+
+
+        virtual void annotate() = 0;
+    };
+
+    //**************************************************************
+    // MetroII physical time annotator  
+    //**************************************************************
+    class m2_physical_time_annotator : public m2_annotator
+    {
+      protected:
+        std::map<const char*, double, ltstr>* _time_table;
+
+      public:
+        m2_physical_time_annotator() 
+            : m2_annotator()
+        {
+            _time_table = new std::map<const char*, double, ltstr>();
+        }
+
+        m2_physical_time_annotator(const char* name) 
+            : m2_annotator(name)
+        {
+            _time_table = new std::map<const char*, double, ltstr>();
+        }
+
+        m2_physical_time_annotator(const std::vector<m2_event *> event_list) 
+            : m2_annotator(event_list)
+        {
+            _time_table = new std::map<const char*, double, ltstr>();
+        }
+
+        m2_physical_time_annotator(const char* name, const std::vector<m2_event *> event_list) 
+            : m2_annotator(name, event_list)
+        {
+            _time_table = new std::map<const char*, double, ltstr>();
+        }
+
+        m2_physical_time_annotator(const std::vector<m2_event *> event_list, 
+                std::map<const char*, double, ltstr>* const time_table)
+            : m2_annotator(event_list)
+        {
+            _time_table = time_table;
+        }
+
+
+        m2_physical_time_annotator(const char* name, const std::vector<m2_event *> event_list, 
+                std::map<const char*, double, ltstr>* const time_table)
+            : m2_annotator(name, event_list)
+        {
+            _time_table = time_table;
+        }
+
+        void add_time_table_entry(const char* event_name, double exec_time)
+        {
+            (*_time_table)[event_name] = exec_time;
+        }
+
+        void annotate()
+        {
+            char *tmpstr;
+
+            for (unsigned i = 0; i < _event_list.size(); i ++)
+            {
+                M2_DEBUG3(_event_list[i]->get_full_name() << " " << _event_list[i]->string_status());
+                if (_event_list[i]->get_status() == (char)M2_EVENT_PROPOSED)
+                {
+                    STR_CAT(tmpstr, _event_list[i]->get_owner().name(), _event_list[i]->name());
+                    _event_list[i]->tag = (*_time_table)[(const char*)tmpstr];
+                    free(tmpstr);
+                }
+            }
+        }
+
+    };
+
+    //**************************************************************
+    // MetroII scheduler 
+    //**************************************************************    
+    class m2_scheduler
+    {
+      protected:
+        const char* _name;
+        std::vector<m2_event *> _event_list;
+        bool stable;
+
+      public:
+
+        int type;
+        // type >= 1: the processes using the scheduler should notify it when the process finishes
+        // type == 1: logical time scheduler
+
+        m2_scheduler()
+        {
+            _name = "unknown";
+        }
+
+        m2_scheduler(const char* name)
+        {
+            _name = name; 
+        }
+
+        m2_scheduler(const std::vector<m2_event *> event_list)
+        {
+            _name = "unknown"; 
+            _event_list= event_list;
+        }
+
+        m2_scheduler(const char* name, const std::vector<m2_event *> event_list)
+        {
+            _name = name; 
+            _event_list= event_list;
+        }
+
+        void add_event(m2_event* e)
+        {
+            _event_list.push_back(e);
+        }
+
+        virtual ~m2_scheduler() {}
+
+        virtual void update_end_process(sc_process_handle proc) = 0;
+
+        virtual void schedule() = 0;
+
+        virtual bool is_stable() = 0;
+
+        virtual void post_schedule() = 0;
+    };
+
+    //**************************************************************
+    // MetroII logical time scheduler 
+    //**************************************************************    
+    struct ltevent
+    {
+        bool operator()(m2_event* e1, m2_event* e2) const
+        {
+            if (e1->get_owner() == e2->get_owner())
+                return strncmp(e1->name(), e2->name(), strlen(e1->name()) - 1) < 0;
+            else
+                return (((sc_process_b*) (sc_process_handle) e1->get_owner()) < 
+                        ((sc_process_b*) (sc_process_handle) e2->get_owner()));
+        }
+    };
+
+    class m2_logical_time_scheduler : public m2_scheduler
+    {
+      protected:
+        int total_requests;
+        double _current_time;
+        double current_next_time;
+        bool existDisabled;
+        std::map<m2_event *, double, ltevent> _beg_time_table;
+        std::vector<sc_process_handle> _process_list;
+
+      public:
+        m2_logical_time_scheduler(int _total_requests) 
+            : m2_scheduler()
+        {
+            type = 1;
+            _current_time = 0;
+            total_requests = _total_requests; 
+        }
+
+        m2_logical_time_scheduler(const char* name, int _total_requests) 
+            : m2_scheduler(name)
+        {
+            type = 1;
+            _current_time = 0;
+            total_requests = _total_requests; 
+        }
+
+        m2_logical_time_scheduler(const std::vector<m2_event *> event_list, int _total_requests) 
+            : m2_scheduler(event_list)
+        {
+            type = 1;
+            _current_time = 0;
+            total_requests = _total_requests; 
+        }
+
+        m2_logical_time_scheduler(const char* name, const std::vector<m2_event *> event_list, int _total_requests) 
+            : m2_scheduler(name, event_list)
+        {
+            type = 1;
+            _current_time = 0;
+            total_requests = _total_requests; 
+        }
+
+        void set_start_time(double time)
+        {
+            _current_time = time;
+        }
+
+        double get_current_time()
+        {
+            return _current_time; 
+        }
+        void add_event(m2_event* e)
+        {
+            _event_list.push_back(e);
+            if (std::find(_process_list.begin(), _process_list.end(), e->get_owner()) == _process_list.end())
+                _process_list.push_back(e->get_owner());
+        }
+
+        void update_end_process(sc_process_handle proc)
+        {
+            std::vector<sc_process_handle>::iterator it;
+            it = std::find(_process_list.begin(), _process_list.end(), proc);
+            if (it != _process_list.end())
+            {
+                _process_list.erase(it);
+                decrement_total_requests();
+            }
+        }
+
+        void decrement_total_requests()
+        {
+            total_requests --;
+        }
+
+        void schedule()
+        {
+            std::vector<int> enable_list;
+            int current_requests = 0;
+            bool proceed = true;
+
+            current_next_time = -1;
+
+            std::vector<char> status_list;
+            for (unsigned int i=0; i<_event_list.size(); i++)
+            {
+                status_list.push_back((char)_event_list[i]->get_status());
+            }
+
+            for (unsigned i = 0; i < _event_list.size(); i ++)
+            {
+                M2_DEBUG3("During scheduling " << _event_list[i]->get_full_name() << " is " << _event_list[i]->string_status()); 
+                // proposed begin event - will be executed immediately
+                // record current time
+                if ((_event_list[i]->get_status() == (char)M2_EVENT_PROPOSED) && 
+                        (_event_list[i]->name()[strlen(_event_list[i]->name()) - 1] == 'b'))
+                {
+                    _beg_time_table[_event_list[i]] = _current_time;
+                    M2_DEBUG3("Begin event time " << _event_list[i]->get_owner().name() << " " << _current_time); 
+                    proceed = false;
+                }
+                // waiting begin event (might wait for constraint or resource)
+                // regarded as stopped
+                if (((_event_list[i]->get_status() == (char)M2_EVENT_WAITING)
+                            || (_event_list[i]->get_status() == (char)M2_EVENT_DISABLED)) 
+                        && (_event_list[i]->name()[strlen(_event_list[i]->name()) - 1] == 'b'))
+                {
+                    current_requests ++;
+                }
+                // end event, either just proposed time or was waiting on constraints or time
+                // both regarded as stopped
+                if (((_event_list[i]->get_status() == (char)M2_EVENT_PROPOSED) 
+                            || (_event_list[i]->get_status() == (char)M2_EVENT_WAITING)
+                            || (_event_list[i]->get_status() == (char)M2_EVENT_DISABLED)) 
+                        && (_event_list[i]->name()[strlen(_event_list[i]->name()) - 1] == 'e'))
+                {
+                    current_requests ++;
+                }
+            }
+
+            assert(current_requests <= total_requests);
+
+            if (current_requests < total_requests)
+                proceed = false;
+
+            M2_DEBUG3("proceed " << proceed << " request #: " << current_requests);// << " beg #: " << tmp_request_count);
+
+            if (!proceed)
+            {
+                for (unsigned i = 0; i < _event_list.size(); i ++)
+                {
+                    if (((_event_list[i]->get_status() == (char)M2_EVENT_PROPOSED) 
+                                || (_event_list[i]->get_status() == (char)M2_EVENT_WAITING)) 
+                            && (_event_list[i]->name()[strlen(_event_list[i]->name()) - 1] == 'e'))
+                        _event_list[i]->set_status((char)M2_EVENT_DISABLED);
+                }
+
+                stable = true;
+                for (unsigned i = 0; i < _event_list.size(); i ++)
+                {
+                    if (_event_list[i]->get_status() != status_list[i])
+                    {
+                        stable = false;
+                        break;
+                    }
+                }
+
+                return;
+            }
+
+            for (unsigned i = 0; i < _event_list.size(); i ++)
+            {
+                if (((_event_list[i]->get_status() == (char)M2_EVENT_PROPOSED) 
+                            || (_event_list[i]->get_status() == (char)M2_EVENT_WAITING)
+                            || (_event_list[i]->get_status() == (char)M2_EVENT_DISABLED)) 
+                        && (_event_list[i]->name()[strlen(_event_list[i]->name()) - 1] == 'e'))
+                {
+                    if (_event_list[i]->get_status() == (char)M2_EVENT_PROPOSED)
+                        _event_list[i]->set_status((char)M2_EVENT_WAITING);
+
+                    double proposed_time = _beg_time_table[_event_list[i]] + _event_list[i]->tag;   
+                    if (proposed_time <= current_next_time || current_next_time == -1)
+                        current_next_time = proposed_time;
+                }
+            }
+
+            existDisabled = false;
+            for (unsigned i = 0; i < _event_list.size(); i ++)
+            {
+                if (((_event_list[i]->get_status() == (char)M2_EVENT_WAITING)
+                            || (_event_list[i]->get_status() == (char)M2_EVENT_DISABLED))
+                        && (_event_list[i]->name()[strlen(_event_list[i]->name()) - 1] == 'e'))
+                {
+                    double proposed_time = _beg_time_table[_event_list[i]] + _event_list[i]->tag;
+                    M2_DEBUG3("Proposed_time scheduling " << proposed_time); 
+                    if (proposed_time == current_next_time){
+                        enable_list.push_back(i);
+                        if (_event_list[i]->get_status() == (char)M2_EVENT_DISABLED)
+                        {
+                            existDisabled = true;
+                        }
+                    }
+                    else {
+                        _event_list[i]->set_status((char)M2_EVENT_DISABLED);
+                    }       		
+                }
+            }
+
+            M2_DEBUG1("enable list size " << enable_list.size());
+
+            if (enable_list.size() != 0)
+            {
+                for (unsigned i=0; i<enable_list.size(); i++)
+                {
+                    if (existDisabled)
+                        _event_list[enable_list[i]]->set_status((char)M2_EVENT_DISABLED);
+                    else 
+                        _event_list[enable_list[i]]->set_status((char)M2_EVENT_PROPOSED);
+                }
+                enable_list.clear();
+            }
+
+            stable = true;
+            for (unsigned i = 0; i < _event_list.size(); i ++)
+            {
+                if (_event_list[i]->get_status() != status_list[i])
+                {
+                    stable = false;
+                    break;
+                }
+            }
+        }
+
+        bool is_stable()
+        {
+            return stable;
+        }
+
+        void post_schedule()
+        {
+            for (unsigned int i =0 ; i < _event_list.size(); i++)
+            {
+                if (_event_list[i]->get_status() == (char)M2_EVENT_DISABLED)
+                {
+                    _event_list[i]->set_status((char)M2_EVENT_WAITING);
+                }
+            }
+            if (!existDisabled && (current_next_time != -1))
+            {
+                _current_time = current_next_time;
+                printf("current global time %f\n", _current_time);
+            }
+            for (unsigned int i=0; i < _event_list.size(); i++)
+            {
+                if (_event_list[i]->get_status() == (char)M2_EVENT_PROPOSED)
+                {
+                    _event_list[i]->tag = _current_time;
+                }
+            }
+        }
+
+    };
+
+    //**************************************************************
+    // MetroII round-robin shared resource scheduler 
+    //**************************************************************    
+    class m2_round_robin_scheduler : public m2_scheduler
+    {
+      private:
+        int total_requests;
+        unsigned int current_index;
+        std::vector<sc_process_handle> _process_list;
+
+      public:
+        m2_round_robin_scheduler()
+            : m2_scheduler()
+        {
+            type = 2;
+            current_index = 0;
+            _name = "unknown";
+        }
+
+        m2_round_robin_scheduler(const char* name)
+            : m2_scheduler(name)
+        {
+            type = 2;
+            current_index = 0;
+            _name = name; 
+        }
+
+        m2_round_robin_scheduler(const std::vector<m2_event *> event_list)
+            : m2_scheduler(event_list)
+        {
+            type = 2;
+            current_index = 0;
+            _name = "unknown"; 
+            _event_list= event_list;
+        }
+
+        m2_round_robin_scheduler(const char* name, const std::vector<m2_event *> event_list)
+            : m2_scheduler(name, event_list)
+        {
+            type = 2;
+            current_index = 0;
+            _name = name; 
+            _event_list= event_list;
+        }
+
+        void add_event(m2_event* e)
+        {
+            _event_list.push_back(e);
+            if (std::find(_process_list.begin(), _process_list.end(), e->get_owner()) == _process_list.end())
+                _process_list.push_back(e->get_owner());
+        }
+
+        void update_end_process(sc_process_handle proc)
+        {
+            M2_DEBUG3("start updating end process");
+            M2_DEBUG3("event list size:" << _event_list.size() <<", current index: " << current_index);
+            std::vector<sc_process_handle>::iterator it;
+            it = std::find(_process_list.begin(), _process_list.end(), proc);
+            if (it != _process_list.end())
+            {
+                unsigned int i = 0;
+                while (i < _event_list.size())
+                {
+                    if (_event_list[i]->get_owner() == proc)
+                    {
+                        if (current_index > i)
+                        {
+                            current_index --;
+                        }
+                        _event_list.erase(_event_list.begin() + i);
+                    }
+                    else {
+                        i ++;
+                    }
+                }
+                if (current_index >= _event_list.size())
+                {
+                    assert(current_index == _event_list.size());
+                    current_index = 0;
+                }
+                _process_list.erase(it);
+                decrement_total_requests();
+            }
+            M2_DEBUG3("finish updating end process");
+            M2_DEBUG3("event list size:" << _event_list.size() <<", current index: " << current_index);
+        }
+
+        void decrement_total_requests()
+        {
+            total_requests --;
+        }
+
+        void schedule()
+        {
+            M2_DEBUG3("before round robin scheduling: \n");
+            for (unsigned int i=0; i<_event_list.size(); i++)
+            {
+                M2_DEBUG3("event: "<<_event_list[i]->get_full_name()<<" status: "<<_event_list[i]->string_status());
+            }
+
+            std::vector<char> status_list;
+            for (unsigned int i=0; i<_event_list.size(); i++)
+            {
+                status_list.push_back((char)_event_list[i]->get_status());
+            }
+
+            M2_DEBUG1("current index: " << current_index);
+            for (unsigned int i=0; i<_event_list.size(); i++)
+            {
+                if (((_event_list[i]->get_status() == (char)M2_EVENT_PROPOSED)
+                            || (_event_list[i]->get_status() == (char)M2_EVENT_WAITING))
+                        && (i != current_index))
+                {
+                    _event_list[i]->set_status((char)M2_EVENT_DISABLED);
+                }
+            }
+            if ((_event_list[current_index]->get_status() == (char)M2_EVENT_PROPOSED)
+                    || (_event_list[current_index]->get_status() == (char)M2_EVENT_WAITING))
+            {
+                _event_list[current_index]->set_status((char)M2_EVENT_PROPOSED);
+
+            }
+
+            stable = true;
+            for (unsigned i = 0; i < _event_list.size(); i ++)
+            {
+                if (_event_list[i]->get_status() != status_list[i])
+                {
+                    stable = false;
+                    break;
+                }
+            }
+
+            M2_DEBUG3("after round robin scheduling: \n");
+            for (unsigned int i=0; i<_event_list.size(); i++)
+            {
+                M2_DEBUG3("event: "<<_event_list[i]->get_full_name()<<" status: "<<_event_list[i]->string_status());
+            }
+        }
+
+        bool is_stable()
+        {
+            return stable;
+        }
+
+        void post_schedule()
+        {
+            if (_event_list[current_index]->get_status() == (char)M2_EVENT_PROPOSED)
+            {
+                M2_DEBUG1("enable index " << current_index <<" in rr schedule");
+                current_index ++;
+                if (current_index == _event_list.size())
+                {
+                    current_index = 0;
+                }
+            }
+            for (unsigned int i = 0; i<_event_list.size(); i++)
+            {
+                if (_event_list[i]->get_status() == (char)M2_EVENT_DISABLED)
+                {
+                    _event_list[i]->set_status((char)M2_EVENT_WAITING);
+                }
+            }
+        }
+    };
+
+} // end namespace m2_core
+
+#endif
