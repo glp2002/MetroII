@@ -1,4 +1,4 @@
-$Id: README.txt,v 1.3 2008/03/13 01:00:03 densmore Exp $
+$Id: README.txt,v 1.3 2013/09/27 01:00:03 glp Exp $
 
 Metro II 1.0.alpha
 
@@ -13,9 +13,7 @@ Lessons learned from the Metropolis indicate the need for three new
 features: support importation of pre-designed intellectual property,
 separating cost from behavior when carrying out design and exploring
 the design space in a structured manner. Metro II is a rewrite of
-Metropolis that will included these three new features.  We intend to
-ship an alpha on March 13, a beta on June 4 and a final release on
-July 31.
+Metropolis that will included these three new features. 
 
 INSTALL
 =======
