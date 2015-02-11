@@ -18,12 +18,19 @@ Metropolis that will included these three new features.
 INSTALL
 =======
 
-- Run "./configure" in the current directory to setup make variables. Please specify the directory of SystemC if needed. For example:  
+- Download and install SystemC from http://www.systemc.org
+
+- Run "./configure" in the current directory to setup make variables. Please specify the directory of SystemC and SystemC lib if needed. For example,  
 
     ./configure --with-systemc=/home/lguo/Project/systemc-2.3.1 --with-systemc-lib=lib-linux64
 
 - Compile source by running "make" in src/
 - Compile examples in examples/producer-consumer and examples/producer-consumer 
+
+- Run the example. Please make sure the LD_LIBRARY_PATH is correctly set up. For example, 
+
+    LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/home/lguo/Project/systemc-2.3.1/lib-linux64
+
 
 ADDITIONAL INFORMATION
 ======================
